@@ -1,4 +1,4 @@
-# Python Visualizer
+# Lantern
 
 Run a Python program **one line at a time** and see what happens in memory: variables,
 function calls (frames), lists/dicts/objects (with arrows for references) and printed output.
