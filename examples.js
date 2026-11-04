@@ -1,5 +1,16 @@
 // Example programs shown in the "Examples" menu. Add your own: {group, title, code}.
 window.PYVIZ_EXAMPLES = [
+    {
+    group: 'intro',
+    title: 'Secret number',
+    code: `secret = 7
+guess = int(input('Guess the number: '))
+if guess == secret:
+    print('Correct!')
+else:
+    print('Wrong!')
+`,
+  },
   {
     group: 'Loops',
     title: 'while: if vs while',
