@@ -50,6 +50,7 @@ What students see at every step:
 | `index.html`, `styles.css`, `app.js` | the page and the UI (no build step) |
 | `tracer.py` | records the execution with `sys.settrace` (runs inside Pyodide) |
 | `tracer.js` | **generated** from `tracer.py`. Run `python3 build_tracer_js.py` after editing it |
-| `vu-griffin.svg` | VU griffin (taken from the official `VU-logo-RGB.svg`), used as logo and favicon |
+| `vu-griffin.svg` | VU griffin in VU blue (taken from the official `VU-logo-RGB.svg`) |
+| `vu-griffin-green.svg` | the same griffin in green (`#2e9e5b`), used as logo and favicon. To go back to blue, set `.logo` colour in `styles.css` to `#0089cf` and the favicon in `index.html` to `vu-griffin.svg` |
 | `examples.js` | programs in the **Examples** menu. Add your own `{group, title, code}` entries |
 | `test_tracer.py` | tests for the tracer: `python3 test_tracer.py` |
