@@ -22,6 +22,8 @@
       <select id="examples" aria-label="Load an example program">
         <option value="">📚 Examples…</option>
       </select>
+      <button id="btn-new" class="ghost" title="Start a new, empty program">📄 New</button>
+      <button id="btn-save" class="ghost" title="Save this program in this browser (Ctrl/⌘ + S)">💾 Save</button>
       <button id="btn-share" class="ghost" title="Copy a link that opens this program">🔗 Share</button>
       <div class="seg" role="group" aria-label="Text size">
         <button id="btn-smaller" class="ghost" title="Smaller text">A−</button>
@@ -83,6 +85,7 @@
         <span class="panel-title">Memory</span>
         <span class="muted small">variables &amp; objects</span>
         <span class="spacer"></span>
+        <button id="btn-reset-layout" class="ghost small-btn" hidden title="Put every object back in its automatic place">↺ Reset layout</button>
         <div class="seg" role="group" aria-label="How to show lists and objects">
           <button id="view-arrows" class="ghost" title="Show lists and objects separately, with arrows (references)">Arrows</button>
           <button id="view-inline" class="ghost" title="Show lists and objects inside the variables">Inline</button>
@@ -103,6 +106,40 @@
   </main>
 
   <div id="toast" class="toast" role="status"></div>
+
+  <dialog id="dlg-save" class="dlg" aria-labelledby="save-heading">
+    <form id="save-form" method="dialog">
+      <h2 id="save-heading">Save program</h2>
+      <label class="field">Title
+        <input id="save-title" required maxlength="80" autocomplete="off" placeholder="e.g. Grades per student">
+      </label>
+      <label class="field">Group
+        <input id="save-group" maxlength="60" autocomplete="off" list="group-list" placeholder="My programs">
+      </label>
+      <datalist id="group-list"></datalist>
+      <p id="save-note" class="muted small"></p>
+      <div class="dlg-actions">
+        <button type="button" id="save-cancel">Cancel</button>
+        <button type="submit" class="primary">💾 Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-manage" class="dlg dlg-wide" aria-labelledby="manage-heading">
+    <h2 id="manage-heading">My programs</h2>
+    <p class="muted small">Saved in this browser, in the same format as <code>examples.js</code>
+      (<code>{group, title, code}</code>). Use <b>Download examples.js</b> to get a file with the
+      built-in examples and yours, ready to replace <code>examples.js</code> in the project.</p>
+    <ul id="prog-list" class="prog-list"></ul>
+    <div class="dlg-actions">
+      <button type="button" id="btn-import" title="Load programs from a .json file or an examples.js file">📂 Import…</button>
+      <button type="button" id="btn-export" title="Download only your programs, as JSON">⬇ Export (.json)</button>
+      <button type="button" id="btn-export-js" title="Download examples.js with the built-in examples and yours">⬇ Download examples.js</button>
+      <span class="spacer"></span>
+      <button type="button" id="manage-close" class="primary">Done</button>
+    </div>
+    <input id="import-file" type="file" accept=".json,.js,application/json,text/javascript" hidden>
+  </dialog>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>

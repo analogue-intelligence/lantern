@@ -23,6 +23,10 @@ no server and students don't need to install anything.
 | Back to editing | click anywhere in the **code** (or **✏️ Edit code**) |
 | Bigger text for the lecture hall | **A+** (remembered per browser) |
 | Lists inside variables instead of arrows | **Inline** toggle (Memory panel) |
+| Tidy up a busy picture | **drag** objects and frames (Arrows view); double-click one, or **↺ Reset layout**, to put it back |
+| Write a new program | **📄 New** |
+| Keep a program | **💾 Save** (`Ctrl/⌘ + S`): stored in this browser, shown in **Examples** under ★ *group* |
+| Share your programs / add them to the menu for everyone | **Examples → ⚙️ Manage my programs**: Export (.json), Import, or **Download examples.js** (built-in examples + yours, ready to replace `examples.js`) |
 | Link that opens a program (at the current step) | **🔗 Share**, which copies a `#code=…&step=N` URL |
 
 What students see at every step:
@@ -31,6 +35,9 @@ What students see at every step:
 * **×N** next to each line: how many times that line has run (handy for loops),
 * "What line 4 did" chips: `spam 0 → 1`, `new i = 0`, `printed Hello`, `called f(x=3)`,
 * changed variables highlighted in yellow and new ones in green, in the Memory panel,
+* the full type of a list, dict, tuple or set when you hover its label, including what is inside it:
+  `dict[str, dict[int, list[float]]]`, `list[int | None]`, `tuple[int, str]` (hovering a variable name shows its type too),
+* objects laid out left to right by how deeply they are nested, gliding smoothly when the layout changes,
 * friendly hints for common errors (`NameError`, `IndexError`, missing `:`, …).
 
 `input()` works: when the program asks for input, a text box appears in the Output panel.
@@ -52,5 +59,5 @@ What students see at every step:
 | `tracer.js` | **generated** from `tracer.py`. Run `python3 build_tracer_js.py` after editing it |
 | `vu-griffin.svg` | VU griffin in VU blue (taken from the official `VU-logo-RGB.svg`) |
 | `vu-griffin-green.svg` | the same griffin in green (`#2e9e5b`), used as logo and favicon. To go back to blue, set `.logo` colour in `styles.css` to `#0089cf` and the favicon in `index.html` to `vu-griffin.svg` |
-| `examples.js` | programs in the **Examples** menu. Add your own `{group, title, code}` entries |
+| `examples.js` | programs in the **Examples** menu. Add your own `{group, title, code}` entries, by hand or with **Download examples.js** |
 | `test_tracer.py` | tests for the tracer: `python3 test_tracer.py` |

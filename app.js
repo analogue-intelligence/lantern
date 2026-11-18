@@ -79,6 +79,8 @@
     seed: 0,
     playTimer: null,
     view: store.get('view', 'arrows'),
+    offsets: {},           // dragged objects / frames, see "dragging & smooth layout"
+    lastLayout: null,      // what the Memory panel showed last ('arrows' | 'inline' | null)
     autoRun: !!fromHash.code,
     startStep: Number.isFinite(fromHash.step) ? fromHash.step - 1 : 0,
   };
@@ -203,6 +205,7 @@
     if (state.mode === 'vis') return;
     if (!workerReady) { state.autoRun = true; state.startStep = startAt; toast('Python is still loading, it will start automatically'); return; }
     stopPlay();
+    if (cm.getValue() !== state.code) state.offsets = {};   // a different program: automatic layout again
     state.code = cm.getValue();
     state.inputs = [];
     state.seed = Math.floor(Math.random() * 1e9);
@@ -267,9 +270,11 @@
     } else {
       stopPlay();
       state.trace = null;
+      state.lastLayout = null;
       clearMarks();
       renderEmpty();
     }
+    updateResetButton();
     requestAnimationFrame(() => { cm.refresh(); drawArrows(); });
   }
 
@@ -318,6 +323,42 @@
       default: s = o.repr;
     }
     return s.length > 70 ? s.slice(0, 69) + '…' : s;
+  }
+  // Python-style type of a value, including the types inside containers:
+  // {"Anna": {2024: [7.5]}} -> dict[str, dict[int, list[float]]]
+  const PRIM_TYPES = { NoneType: 'None', builtin: 'builtin_function', trunc: '…' };
+  function typeUnion(types) {
+    const uniq = [...new Set(types)];
+    // [[1], []] is list[list[int]], not list[list[int] | list]
+    const kept = uniq.filter((t) => !uniq.some((u) => u !== t && u.startsWith(t + '[')));
+    return kept.join(' | ');
+  }
+  function typeName(val, heap, seen = new Set()) {
+    if (!val) return '';
+    if ('v' in val) return PRIM_TYPES[val.t] || val.t;
+    const k = String(val.ref);
+    const o = heap[k];
+    if (!o) return '…';
+    const base = o.type === 'instance' || o.type === 'other' ? o.name : o.type === 'class' ? 'type' : o.type;
+    if (seen.has(k) || seen.size > 6) return base;        // cycles and very deep nesting
+    const inner = new Set(seen).add(k);
+    const t = (v) => typeName(v, heap, inner);
+    switch (o.type) {
+      case 'list': case 'set': case 'frozenset':
+        return o.items.length ? `${o.type}[${typeUnion(o.items.map(t))}]` : o.type;
+      case 'tuple': {
+        if (!o.items.length) return 'tuple';
+        const ts = o.items.map(t);
+        if (ts.length <= 4 && !o.more) return `tuple[${ts.join(', ')}]`;
+        return `tuple[${typeUnion(ts)}, ...]`;
+      }
+      case 'dict':
+        return o.entries.length
+          ? `dict[${typeUnion(o.entries.map(([key]) => t(key)))}, ${typeUnion(o.entries.map(([, v]) => t(v)))}]`
+          : 'dict';
+      default:
+        return base;
+    }
   }
   function sameVal(a, b) {
     if ('v' in a && 'v' in b) return a.v === b.v && a.t === b.t;
@@ -537,14 +578,19 @@
     const inner = new Set(seen);
     inner.add(k);
     const o = heap[k];
-    return `<div class="obj inline-obj"><div class="obj-label">${esc(objLabel(o))}</div>${renderObjBody(o, heap, true, inner)}</div>`;
+    return `<div class="obj inline-obj">${objLabel(k, heap)}${renderObjBody(o, heap, true, inner)}</div>`;
   }
 
-  function objLabel(o) {
-    if (!o) return '';
-    if (o.type === 'instance') return o.name + ' object';
-    if (o.type === 'other') return o.name;
-    return o.type;
+  function objLabel(k, heap) {
+    const o = heap[k];
+    if (!o) return '<div class="obj-label"></div>';
+    // the label shows only the outer type (list, dict, ...); hovering it shows the full type
+    let text = o.type;
+    if (o.type === 'instance') text = o.name + ' object';
+    else if (o.type === 'other') text = o.name;
+    const full = typeName({ ref: +k }, heap);
+    const tip = full !== text && full !== o.name ? ` title="${esc(full)}"` : '';
+    return `<div class="obj-label"><span class="ty"${tip}>${esc(text)}</span></div>`;
   }
 
   function renderObjBody(o, heap, inline, seen) {
@@ -597,8 +643,157 @@
     return order;
   }
 
+  // Objects in columns by how deeply they are nested: what variables point at directly is in the
+  // first column, the objects inside those in the second one, and so on (like a tree, left to right).
+  function heapLevels(step) {
+    const depth = {};
+    let frontier = [];
+    const reach = (v, d, next) => {
+      if (!v || v.ref == null) return;
+      const k = String(v.ref);
+      if (k in depth || !(k in step.heap)) return;
+      depth[k] = d;
+      next.push(k);
+    };
+    for (const f of step.frames) {
+      f.vars.forEach(([, v]) => reach(v, 0, frontier));
+      if (f.ret) reach(f.ret, 0, frontier);
+    }
+    for (let d = 1; frontier.length; d++) {
+      const next = [];
+      frontier.forEach((k) => childrenOf(step.heap[k]).forEach((c) => reach(c, d, next)));
+      frontier = next;
+    }
+    const levels = [];
+    for (const k of heapOrder(step)) {
+      const d = depth[k] ?? 0;
+      (levels[d] = levels[d] || []).push(k);
+    }
+    return levels.filter(Boolean);
+  }
+
+  // ---------------------------------------------------------------- dragging & smooth layout
+  // state.offsets: {"o12": {x, y}, "f1": {x, y}}, how far the student dragged an object or frame
+  // away from its automatic place. Kept while stepping, reset for a new program.
+  const offsetStyle = (key) => {
+    const o = state.offsets[key];
+    return o ? ` style="translate:${o.x}px ${o.y}px"` : '';
+  };
+  function measureBoxes() {
+    const viz = $('viz');
+    const box = viz.getBoundingClientRect();
+    const at = new Map();
+    viz.querySelectorAll('[data-key]').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      at.set(el.dataset.key, { x: r.left - box.left + viz.scrollLeft, y: r.top - box.top + viz.scrollTop });
+    });
+    return at;
+  }
+  // FLIP: objects that moved because of the new step glide to their new place instead of jumping.
+  function glide(before) {
+    if (!before || !before.size || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const after = measureBoxes();
+    const moving = [];
+    $('viz').querySelectorAll('[data-key]').forEach((el) => {
+      const a = before.get(el.dataset.key);
+      const b = after.get(el.dataset.key);
+      if (!a || !b) return;
+      const dx = a.x - b.x, dy = a.y - b.y;
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+      const off = state.offsets[el.dataset.key] || { x: 0, y: 0 };
+      el.style.translate = `${off.x + dx}px ${off.y + dy}px`;
+      moving.push([el, off]);
+    });
+    if (!moving.length) return;
+    $('viz').getBoundingClientRect();            // apply the start positions before animating
+    for (const [el, off] of moving) {
+      el.classList.add('gliding');
+      el.style.translate = `${off.x}px ${off.y}px`;
+    }
+    setTimeout(() => moving.forEach(([el]) => el.classList.remove('gliding')), 350);
+    animateArrows(360);
+  }
+  let arrowAnim = 0;
+  function animateArrows(ms) {
+    const until = performance.now() + ms;
+    if (arrowAnim) return void (arrowAnim = Math.max(arrowAnim, until));
+    arrowAnim = until;
+    const tick = () => {
+      drawArrows();
+      if (performance.now() < arrowAnim) requestAnimationFrame(tick);
+      else arrowAnim = 0;
+    };
+    requestAnimationFrame(tick);
+  }
+  let arrowQueued = false;
+  function queueArrows() {
+    if (arrowQueued) return;
+    arrowQueued = true;
+    requestAnimationFrame(() => { arrowQueued = false; drawArrows(); });
+  }
+  function updateResetButton() {
+    $('btn-reset-layout').hidden = !Object.keys(state.offsets).length || state.view === 'inline' || state.mode !== 'vis';
+  }
+
+  let drag = null;
+  $('viz').addEventListener('pointerdown', (e) => {
+    if (state.mode !== 'vis' || state.view === 'inline' || e.button !== 0) return;
+    const el = e.target.closest('[data-key]');
+    if (!el) return;
+    const viz = $('viz');
+    const box = viz.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    const start = state.offsets[el.dataset.key] || { x: 0, y: 0 };
+    drag = {
+      el, key: el.dataset.key, id: e.pointerId, sx: e.clientX, sy: e.clientY, start, moved: false,
+      // where the element would be without any offset: it may not be dragged above / left of the panel
+      minX: -(r.left - box.left + viz.scrollLeft - start.x),
+      minY: -(r.top - box.top + viz.scrollTop - start.y),
+    };
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+    if (!drag.moved) {
+      if (Math.hypot(dx, dy) < 4) return;       // a click, not a drag (keeps hover/selection working)
+      drag.moved = true;
+      drag.el.classList.remove('gliding');
+      drag.el.classList.add('dragging');
+      document.body.classList.add('is-dragging');
+      try { drag.el.setPointerCapture(drag.id); } catch { /* not supported */ }
+    }
+    e.preventDefault();
+    const off = { x: Math.max(drag.minX, drag.start.x + dx), y: Math.max(drag.minY, drag.start.y + dy) };
+    state.offsets[drag.key] = off;
+    drag.el.style.translate = `${off.x}px ${off.y}px`;
+    queueArrows();
+  });
+  const endDrag = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (drag.moved) {
+      drag.el.classList.remove('dragging');
+      document.body.classList.remove('is-dragging');
+      updateResetButton();
+      drawArrows();
+    }
+    drag = null;
+  };
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
+  $('viz').addEventListener('dblclick', (e) => {      // double-click puts one object back in its place
+    const el = e.target.closest('[data-key]');
+    if (!el || !state.offsets[el.dataset.key]) return;
+    const before = measureBoxes();
+    delete state.offsets[el.dataset.key];
+    el.style.translate = '';
+    glide(before);
+    updateResetButton();
+  });
+
   function renderMemory(step, diff) {
     const inline = state.view === 'inline';
+    const before = state.lastLayout === (inline ? 'inline' : 'arrows') ? measureBoxes() : null;
+    state.lastLayout = inline ? 'inline' : 'arrows';
     $('viz').classList.toggle('inline', inline);
     const n = step.frames.length;
     const frames = step.frames.map((f, idx) => {
@@ -607,26 +802,29 @@
         let cls = '';
         if (diff.newVars.has(key)) cls = 'new';
         else if (diff.changedVars.has(key) || (inline && touchesChanged(val, step.heap, diff.changedObjs))) cls = 'changed';
-        return `<tr class="var ${cls}"><th>${esc(name)}</th><td>${renderVal(val, step.heap, inline, new Set())}</td></tr>`;
+        return `<tr class="var ${cls}"><th title="${esc(name)}: ${esc(typeName(val, step.heap))}">${esc(name)}</th><td>${renderVal(val, step.heap, inline, new Set())}</td></tr>`;
       });
       if (f.ret) rows.push(`<tr class="var ret"><th>return value</th><td>${renderVal(f.ret, step.heap, inline, new Set())}</td></tr>`);
       const active = idx === n - 1 && step.event !== 'finished';
       const title = idx === 0 ? 'Global frame' : esc(f.name);
       const tag = idx === 0 ? '' : '<span class="tag">function call</span>';
-      return `<div class="frame ${active ? 'active' : ''} ${diff.newFrames.has(f.id) ? 'appear' : ''}"><div class="frame-head"><span>${title}</span>${tag}</div>` +
+      const key = 'f' + f.id;
+      return `<div class="frame ${active ? 'active' : ''} ${diff.newFrames.has(f.id) ? 'appear' : ''}"${inline ? '' : ` data-key="${key}"${offsetStyle(key)}`}><div class="frame-head"><span>${title}</span>${tag}</div>` +
         (rows.length ? `<table class="vars">${rows.join('')}</table>` : '<div class="empty">no variables yet</div>') + '</div>';
     });
     $('frames').innerHTML = frames.join('') || '<div class="empty">no frames</div>';
     if (!inline) {
-      const cards = heapOrder(step).map((k) => {
+      const levels = heapLevels(step).map((keys) => '<div class="heap-level">' + keys.map((k) => {
         const o = step.heap[k];
         const cls = diff.newObjs.has(k) && state.cur > 0 ? 'new' : diff.changedObjs.has(k) ? 'changed' : '';
-        return `<div class="obj ${cls}" data-oid="${k}"><div class="obj-label">${esc(objLabel(o))}</div>${renderObjBody(o, step.heap, false, new Set([k]))}</div>`;
-      });
-      $('heap').innerHTML = cards.join('') || '<div class="empty">no lists or other objects yet</div>';
+        return `<div class="obj ${cls}" data-oid="${k}" data-key="o${k}"${offsetStyle('o' + k)}>${objLabel(k, step.heap)}${renderObjBody(o, step.heap, false, new Set([k]))}</div>`;
+      }).join('') + '</div>');
+      $('heap').innerHTML = levels.join('') || '<div class="empty">no lists or other objects yet</div>';
     } else {
       $('heap').innerHTML = '';
     }
+    updateResetButton();
+    if (before) glide(before);
     requestAnimationFrame(drawArrows);
   }
 
@@ -693,6 +891,7 @@
     $('view-arrows').classList.toggle('on', view === 'arrows');
     $('view-inline').classList.toggle('on', view === 'inline');
     if (state.mode === 'vis') render();
+    else updateResetButton();
   }
 
   function setFontSize(px) {
@@ -708,28 +907,201 @@
     store.set('theme', theme);
   }
 
-  // examples menu
+  // ---------------------------------------------------------------- examples & my programs
+  // "My programs" are kept in this browser (localStorage) as [{group, title, code}], the same
+  // structure as window.PYVIZ_EXAMPLES, so they can be exported into examples.js.
+  const DEFAULT_GROUP = 'My programs';
+  const cleanProgram = (p) => (p && typeof p.title === 'string' && typeof p.code === 'string'
+    ? { group: String(p.group || DEFAULT_GROUP).trim() || DEFAULT_GROUP, title: p.title.trim() || 'Untitled', code: p.code }
+    : null);
+  function loadPrograms() {
+    try {
+      const list = JSON.parse(store.get('programs', '[]'));
+      return Array.isArray(list) ? list.map(cleanProgram).filter(Boolean) : [];
+    } catch { return []; }
+  }
+  let programs = loadPrograms();
+  function savePrograms() { store.set('programs', JSON.stringify(programs)); }
+  const findProgram = (group, title) => programs.findIndex((p) => p.group === group && p.title === title);
+  // what is in the editor: {group, title, mine} of the last loaded / saved program, and its code
+  state.current = null;
+  state.loadedCode = cm.getValue();
+
   const sel = $('examples');
-  const groups = {};
-  examples.forEach((ex, i) => {
-    if (!groups[ex.group]) {
-      groups[ex.group] = document.createElement('optgroup');
-      groups[ex.group].label = ex.group;
-      sel.appendChild(groups[ex.group]);
-    }
-    const opt = document.createElement('option');
-    opt.value = String(i);
-    opt.textContent = ex.title;
-    groups[ex.group].appendChild(opt);
-  });
-  sel.addEventListener('change', () => {
-    const ex = examples[parseInt(sel.value, 10)];
-    sel.value = '';
-    if (!ex) return;
+  function fillExamplesMenu() {
+    sel.innerHTML = '<option value="">📚 Examples…</option>';
+    const groups = {};
+    const add = (label, value, title) => {
+      if (!groups[label]) {
+        groups[label] = document.createElement('optgroup');
+        groups[label].label = label;
+        sel.appendChild(groups[label]);
+      }
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = title;
+      groups[label].appendChild(opt);
+    };
+    examples.forEach((ex, i) => add(ex.group, 'b' + i, ex.title));
+    programs.forEach((p, i) => add('★ ' + p.group, 'u' + i, p.title));
+    const manage = document.createElement('option');
+    manage.value = 'manage';
+    manage.textContent = programs.length ? `⚙️ Manage my programs (${programs.length})…` : '⚙️ My programs: import / export…';
+    sel.appendChild(manage);
+  }
+  function loadProgram(p, mine) {
     if (state.mode === 'vis') setMode('edit');
-    cm.setValue(ex.code);
+    cm.setValue(p.code);
+    state.current = { group: p.group, title: p.title, mine };
+    state.loadedCode = p.code;
     visualize();
+  }
+  const unsaved = () => cm.getValue().trim() !== '' && cm.getValue() !== state.loadedCode;
+  sel.addEventListener('change', () => {
+    const v = sel.value;
+    sel.value = '';
+    if (v === 'manage') { openManage(); return; }
+    const p = v[0] === 'b' ? examples[+v.slice(1)] : programs[+v.slice(1)];
+    if (!p) return;
+    if (unsaved() && !confirm('Load "' + p.title + '"? Your current code is not saved and will be replaced.')) return;
+    loadProgram(p, v[0] === 'u');
   });
+
+  function newProgram() {
+    if (unsaved() && !confirm('Start a new program? Your current code is not saved and will be replaced.')) return;
+    if (state.mode === 'vis') setMode('edit');
+    cm.setValue('');
+    state.current = null;
+    state.loadedCode = '';
+    cm.focus();
+  }
+
+  function openSave() {
+    if ($('dlg-save').open || $('dlg-manage').open) return;
+    const cur = state.current;
+    $('save-title').value = cur ? cur.title : '';
+    $('save-group').value = cur && cur.mine ? cur.group : DEFAULT_GROUP;
+    $('group-list').innerHTML = [...new Set([DEFAULT_GROUP, ...programs.map((p) => p.group), ...examples.map((e) => e.group)])]
+      .map((g) => `<option value="${esc(g)}"></option>`).join('');
+    updateSaveNote();
+    $('dlg-save').showModal();
+    $('save-title').select();
+  }
+  function updateSaveNote() {
+    const title = $('save-title').value.trim();
+    const group = $('save-group').value.trim() || DEFAULT_GROUP;
+    $('save-note').textContent = title && findProgram(group, title) >= 0
+      ? `This replaces your saved program "${title}" in "${group}".`
+      : 'It is saved in this browser and appears in the Examples menu under ★ ' + group + '.';
+  }
+  $('save-title').addEventListener('input', updateSaveNote);
+  $('save-group').addEventListener('input', updateSaveNote);
+  $('save-cancel').addEventListener('click', () => $('dlg-save').close());
+  $('save-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const p = cleanProgram({ group: $('save-group').value, title: $('save-title').value, code: state.mode === 'vis' ? state.code : cm.getValue() });
+    if (!p) return;
+    const i = findProgram(p.group, p.title);
+    if (i >= 0) programs[i] = p; else programs.push(p);
+    savePrograms();
+    fillExamplesMenu();
+    state.current = { group: p.group, title: p.title, mine: true };
+    state.loadedCode = p.code;
+    $('dlg-save').close();
+    toast(`Saved "${p.title}"`);
+  });
+
+  function openManage() {
+    renderProgramList();
+    $('dlg-manage').showModal();
+  }
+  function renderProgramList() {
+    $('prog-list').innerHTML = programs.length
+      ? programs.map((p, i) => `<li><span class="pg">${esc(p.group)}</span><span class="pt">${esc(p.title)}</span>` +
+          `<span class="spacer"></span><button type="button" class="ghost" data-load="${i}">Open</button>` +
+          `<button type="button" class="ghost danger" data-del="${i}" title="Delete">🗑</button></li>`).join('')
+      : '<li class="muted">No saved programs yet. Write a program and press <b>💾 Save</b>.</li>';
+  }
+  $('prog-list').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.load != null) {
+      const p = programs[+b.dataset.load];
+      if (unsaved() && !confirm('Open "' + p.title + '"? Your current code is not saved and will be replaced.')) return;
+      $('dlg-manage').close();
+      loadProgram(p, true);
+    } else if (b.dataset.del != null) {
+      const p = programs[+b.dataset.del];
+      if (!confirm(`Delete "${p.title}"? This cannot be undone.`)) return;
+      programs.splice(+b.dataset.del, 1);
+      if (state.current && state.current.mine && state.current.group === p.group && state.current.title === p.title) state.current.mine = false;
+      savePrograms();
+      fillExamplesMenu();
+      renderProgramList();
+    }
+  });
+  $('manage-close').addEventListener('click', () => $('dlg-manage').close());
+
+  function download(name, text, type) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type }));
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  // examples.js in the same hand-written style: code in `template strings`, so the file stays readable
+  const jsQuote = (s) => "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n') + "'";
+  const jsTemplate = (s) => '`' + s.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${') + '`';
+  function examplesJs(list) {
+    return '// Example programs shown in the "Examples" menu. Add your own: {group, title, code}.\n' +
+      'window.PYVIZ_EXAMPLES = [\n' +
+      list.map((p) => `  {\n    group: ${jsQuote(p.group)},\n    title: ${jsQuote(p.title)},\n    code: ${jsTemplate(p.code)},\n  },\n`).join('') +
+      '];\n';
+  }
+  $('btn-export').addEventListener('click', () => {
+    if (!programs.length) { toast('No saved programs to export yet'); return; }
+    download('my-programs.json', JSON.stringify(programs, null, 2) + '\n', 'application/json');
+  });
+  $('btn-export-js').addEventListener('click', () => download('examples.js', examplesJs([...examples, ...programs]), 'text/javascript'));
+
+  // Reads a .json export, or an examples.js file. The .js file is parsed, never run.
+  function parsePrograms(text) {
+    const t = text.trim();
+    if (t.startsWith('[')) return JSON.parse(t);
+    const str = String.raw`'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|` + '`(?:[^`\\\\]|\\\\[\\s\\S])*`';
+    const field = (name) => String.raw`\b${name}\s*:\s*(${str})`;
+    const re = new RegExp(String.raw`\{\s*${field('group')}\s*,\s*${field('title')}\s*,\s*${field('code')}\s*,?\s*\}`, 'g');
+    const unq = (s) => s.slice(1, -1).replace(/\\([\s\S])/g, (m, c) => ({ n: '\n', t: '\t', r: '\r' }[c] ?? c));
+    return [...t.matchAll(re)].map((m) => ({ group: unq(m[1]), title: unq(m[2]), code: unq(m[3]) }));
+  }
+  $('btn-import').addEventListener('click', () => $('import-file').click());
+  $('import-file').addEventListener('change', async () => {
+    const file = $('import-file').files[0];
+    $('import-file').value = '';
+    if (!file) return;
+    let list;
+    try { list = parsePrograms(await file.text()); } catch { list = null; }
+    list = Array.isArray(list) ? list.map(cleanProgram).filter(Boolean) : [];
+    // the built-in examples are already in the menu: don't copy them into "my programs"
+    const builtin = new Set(examples.map((e) => e.group + '\u0000' + e.title + '\u0000' + e.code));
+    list = list.filter((p) => !builtin.has(p.group + '\u0000' + p.title + '\u0000' + p.code));
+    if (!list.length) { toast('No new programs found in ' + file.name); return; }
+    let added = 0, replaced = 0;
+    for (const p of list) {
+      const i = findProgram(p.group, p.title);
+      if (i >= 0) { programs[i] = p; replaced++; } else { programs.push(p); added++; }
+    }
+    savePrograms();
+    fillExamplesMenu();
+    renderProgramList();
+    toast(`Imported ${added} new program${added === 1 ? '' : 's'}` + (replaced ? `, replaced ${replaced}` : ''));
+  });
+  fillExamplesMenu();
+
+  $('btn-new').addEventListener('click', newProgram);
+  $('btn-save').addEventListener('click', openSave);
 
   $('btn-run').addEventListener('click', () => visualize());
   $('btn-edit').addEventListener('click', () => { setMode('edit'); cm.focus(); });
@@ -742,6 +1114,13 @@
   $('slider').addEventListener('input', () => { stopPlay(); go(parseInt($('slider').value, 10)); });
   $('view-arrows').addEventListener('click', () => setView('arrows'));
   $('view-inline').addEventListener('click', () => setView('inline'));
+  $('btn-reset-layout').addEventListener('click', () => {
+    const before = measureBoxes();
+    state.offsets = {};
+    $('viz').querySelectorAll('[data-key]').forEach((el) => { el.style.translate = ''; });
+    glide(before);
+    updateResetButton();
+  });
   $('btn-bigger').addEventListener('click', () => setFontSize(currentFs() + 2));
   $('btn-smaller').addEventListener('click', () => setFontSize(currentFs() - 2));
   $('btn-theme').addEventListener('click', () => {
@@ -764,6 +1143,12 @@
     }
   });
 
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's' && !e.target.closest('dialog')) {
+      e.preventDefault();
+      openSave();
+    }
+  });
   document.addEventListener('keydown', (e) => {
     if (state.mode !== 'vis' || e.metaKey || e.ctrlKey || e.altKey) return;
     const tag = e.target.tagName;

@@ -339,7 +339,19 @@ body.is-vis .CodeMirror-lines { cursor: text; }
 .frames-col { flex: 0 1 auto; min-width: 210px; }
 .viz.inline .frames-col { flex: 1; }
 .heap-col { flex: 1 1 auto; min-width: 180px; }
-#arrows { position: absolute; top: 0; left: 0; pointer-events: none; overflow: visible; z-index: 3; }
+/* one column per nesting level: variables -> outer objects -> inner objects -> ... */
+#heap { display: flex; align-items: flex-start; gap: 3.2rem; }
+.heap-level { flex: none; display: flex; flex-direction: column; align-items: flex-start; }
+#heap .obj-label { background: var(--surface); width: fit-content; border-radius: 4px; }
+
+/* dragging objects and frames around (Arrows view) */
+.viz:not(.inline) [data-key] { position: relative; z-index: 1; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.viz:not(.inline) [data-key][style*="translate"] { z-index: 2; } /* dragged ones stay on top */
+.viz:not(.inline) [data-key].dragging { cursor: grabbing; z-index: 3; filter: drop-shadow(0 6px 14px rgba(20, 30, 60, .18)); }
+body.is-dragging, body.is-dragging * { cursor: grabbing !important; }
+[data-key].gliding { transition: translate .32s cubic-bezier(.2, .7, .2, 1); }
+.small-btn { font-size: .8rem; padding: .2rem .55rem; }
+#arrows { position: absolute; top: 0; left: 0; pointer-events: none; overflow: visible; z-index: 4; }
 #arrows path.arrow { fill: none; stroke: var(--arrow); stroke-width: 1.8; opacity: .85; transition: stroke-width .1s, opacity .1s; }
 #arrows path.arrow.hl { stroke-width: 3; opacity: 1; }
 #arrows .arrowhead { fill: var(--arrow); }
@@ -415,12 +427,13 @@ tr.var.ret > td { background: var(--accent-soft); }
 .obj.new { animation: pop .3s ease-out; }
 .heap-col .obj { display: table; }
 .obj-label { font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: .2rem; }
+.obj-label .ty[title] { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
 .obj.changed > .obj-body, .obj.changed > .cells, .obj.changed > table, .obj.changed > .fn { box-shadow: 0 0 0 3px var(--changed-bg); }
 .obj.new .obj-label::after { content: " · new"; color: var(--new); }
 .obj.hl > .cells, .obj.hl > table, .obj.hl > .fn, .obj.hl > .other { outline: 2px solid var(--arrow); outline-offset: 2px; }
 .obj.inline-obj { margin: .1rem 0; }
 
-.cells { display: inline-flex; flex-wrap: wrap; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+.cells { background: var(--surface); display: inline-flex; flex-wrap: wrap; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
 .cell { display: flex; flex-direction: column; align-items: center; border-left: 1px solid var(--border); min-width: 2.4em; }
 .cell:first-child { border-left: 0; }
 .cell .cv { padding: .3rem .55rem; font-family: var(--mono); font-size: .9rem; background: var(--surface); }
@@ -429,9 +442,9 @@ tr.var.ret > td { background: var(--accent-soft); }
 .cells.set, .cells.frozenset { border-radius: 99px; }
 .cells.set .cell .cv, .cells.frozenset .cell .cv { padding: .3rem .7rem; }
 .cell.more .cv { color: var(--muted); font-style: italic; }
-.emptyobj { font-family: var(--mono); font-size: .88rem; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; padding: .25rem .6rem; }
+.emptyobj { background: var(--surface); font-family: var(--mono); font-size: .88rem; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; padding: .25rem .6rem; }
 
-.obj table.vars { border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; border-spacing: 0; overflow: hidden; width: auto; }
+.obj table.vars { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; border-collapse: separate; border-spacing: 0; overflow: hidden; width: auto; }
 .obj table.vars th { text-align: left; }
 .obj table.dict th { color: var(--text); }
 .obj table.dict th::after { content: ":"; color: var(--muted); margin-left: .1em; }
@@ -446,6 +459,42 @@ tr.var.ret > td { background: var(--accent-soft); }
 }
 .fn .kw { color: var(--t-kw); }
 .inline-obj .obj-label { font-size: .62rem; }
+
+/* ------------------------------------------------------------------ dialogs (save / my programs) */
+.dlg {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .25);
+  padding: 1.1rem 1.2rem;
+  width: min(26rem, calc(100vw - 32px));
+}
+.dlg-wide { width: min(38rem, calc(100vw - 32px)); }
+.dlg::backdrop { background: rgba(10, 15, 30, .35); }
+.dlg h2 { margin: 0 0 .7rem; font-size: 1.05rem; }
+.dlg p { margin: .4rem 0 .8rem; }
+.dlg code { font-size: .85em; background: var(--surface-2); padding: 0 .3em; border-radius: 4px; }
+.field { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; font-weight: 600; color: var(--muted); margin-bottom: .7rem; }
+.field input {
+  font: inherit;
+  font-weight: 400;
+  font-size: .95rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: .45rem .6rem;
+}
+.dlg-actions { display: flex; flex-wrap: wrap; gap: .45rem; justify-content: flex-end; align-items: center; margin-top: .6rem; }
+.prog-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 9px; }
+.prog-list li { display: flex; align-items: center; gap: .55rem; padding: .35rem .5rem .35rem .7rem; border-top: 1px solid var(--border); font-size: .92rem; }
+.prog-list li:first-child { border-top: 0; }
+.prog-list li.muted { padding: .7rem; }
+.prog-list .pg { font-size: .72rem; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 99px; padding: .05rem .5rem; white-space: nowrap; }
+.prog-list .pt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prog-list button { padding: .2rem .5rem; font-size: .85rem; }
+button.danger:hover:not(:disabled) { color: var(--err); border-color: var(--err); }
 
 /* ------------------------------------------------------------------ toast */
 .toast {
